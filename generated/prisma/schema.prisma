@@ -1,0 +1,111 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                String   @id @default(uuid())
+  email             String   @unique
+  password          String?
+  firstName         String
+  lastName          String?
+  avatar            String?
+  username          String?  @unique
+  googleId          String?
+  role              Role     @default(user)
+  isVerified        Boolean  @default(false)
+  verificationToken String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  reviews           Review[]
+}
+
+model Tour {
+  id              String     @id @default(uuid())
+  name            String     @unique
+  duration        Int
+  maxGroupSize    Int
+  price           Float
+  priceDiscount   Float?
+  ratingsAverage  Float      @default(3.7)
+  ratingsQuantity Int        @default(0)
+  difficulty      Difficulty @default(easy)
+  premium         Boolean    @default(false)
+  summary         String
+  description     String?
+  imageCover      String
+  images          String[]
+  createdAt       DateTime   @default(now())
+  startDates      DateTime[]
+  slug            String?
+  secretTour      Boolean    @default(false)
+  guides          Staff[]
+  reviews         Review[]
+
+  // Embedded location data as JSON
+  startLocation Json? // { type: "Point", coordinates: [lng, lat], address: string, description: string }
+  locations     Json[] @default([]) // [{ type: "Point", coordinates: [lng, lat], address: string, description: string, day: number }]
+
+  @@index([price, ratingsAverage(sort: Desc)])
+  @@index([startLocation], type: Gin) // For GeoJSON queries
+}
+
+model Staff {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  password     String?
+  firstName    String
+  lastName     String
+  avatar       String?
+  username     String?
+  googleId     String?
+  role         Role     @default(guide)
+  isActive     Boolean  @default(false)
+  employeeId   String   @unique
+  department   String?
+  hireDate     DateTime @default(now())
+  permissions  String[]
+  createdBy    Staff?   @relation("CreatedBy", fields: [createdById], references: [id])
+  createdById  String?
+  createdStaff Staff[]  @relation("CreatedBy")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  tours        Tour[]
+}
+
+model Review {
+  id        String   @id @default(uuid())
+  review    String
+  rating    Float    @default(2.5)
+  createdAt DateTime @default(now())
+  tour      Tour     @relation(fields: [tourId], references: [id])
+  tourId    String
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+
+  @@unique([tourId, userId])
+}
+
+enum Role {
+  admin
+  lead_guide
+  guide
+  user
+}
+
+enum Difficulty {
+  easy
+  medium
+  difficult
+}
