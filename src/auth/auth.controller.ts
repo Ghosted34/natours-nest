@@ -14,6 +14,7 @@ import {
   LoginDTO,
   RefreshTokenDTO,
   RegisterDTO,
+  ResetPwdDTO,
 } from './dto';
 import { minutes, Throttle } from '@nestjs/throttler';
 import { Request } from 'express';
@@ -57,6 +58,20 @@ export class AuthController {
   })
   async verify(@Req() req: Request) {
     return await this.authService.verify(req.query.token as string);
+  }
+
+  @ApiOperation({ summary: 'Resends Verification Token to mail' })
+  @Throttle({ default: { limit: 1, ttl: minutes(5) } })
+  @Post('resend-verification')
+  @HttpCode(HttpStatus.OK)
+  @ApiResponse({
+    status: 200,
+    description: 'Verification Mail Sent',
+  })
+  @ApiResponse({ status: 404, description: 'User not found' })
+  @ApiResponse({ status: 409, description: 'User already verified' })
+  async resend_verify(@Body('email') email: string) {
+    return await this.authService.resend_verify(email);
   }
 
   @ApiOperation({ summary: 'Logout user' })
@@ -103,8 +118,8 @@ export class AuthController {
     status: 200,
     description: 'Password reset email sent successfully',
   })
-  async forgotPassword(@Req() req: Request) {
-    return await this.authService.forgotPassword(req);
+  async forgotPassword(@Body('email') email: string) {
+    return await this.authService.forgotPassword(email);
   }
 
   @ApiOperation({ summary: 'Reset Password' })
@@ -115,8 +130,8 @@ export class AuthController {
     description: 'Password reset successfully',
   })
   @Post('reset-password')
-  async resetPassword(@Req() req: Request) {
-    return await this.authService.resetPassword(req);
+  async resetPassword(@Body() body: ResetPwdDTO) {
+    return await this.authService.resetPassword(body);
   }
 
   @ApiOperation({ summary: 'Change Password' })

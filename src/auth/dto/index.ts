@@ -14,6 +14,7 @@ export interface JwtPayload {
   email: string;
   role: Role;
   verified: boolean;
+  type?: 'reset' | 'verify';
   sessionId?: string;
   iat?: number;
   exp?: number;
@@ -107,4 +108,16 @@ export class ChangePwdDTO {
   @IsString()
   @IsNotEmpty()
   newPwd: string;
+}
+
+export class ResetPwdDTO {
+  @ApiProperty({ example: 'token.123' })
+  @IsString()
+  @IsNotEmpty()
+  token: string;
+
+  @ApiProperty({ example: 'password123' })
+  @IsString()
+  @IsNotEmpty()
+  password: string;
 }

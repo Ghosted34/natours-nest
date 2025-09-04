@@ -1,4 +1,9 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
 import {
@@ -7,6 +12,7 @@ import {
   JwtPayload,
   LoginDTO,
   RegisterDTO,
+  ResetPwdDTO,
   Role,
 } from './dto';
 import { hash, verify } from 'argon2';
@@ -14,8 +20,6 @@ import { ConfigService } from '@nestjs/config';
 import { EmailService } from 'src/email/email.service';
 import { Request } from 'express';
 import { RedisService } from 'src/redis/redis.service';
-import { generateToken } from 'src/utils/otp';
-import { createHash } from 'crypto';
 
 @Injectable({})
 export class AuthService {
@@ -74,6 +78,36 @@ export class AuthService {
       secret: this.cfg.get('REFRESH_SECRET'),
     });
   }
+
+  async generateJWTToken({
+    id,
+    email,
+    role,
+    verified,
+    type,
+  }: {
+    id: string;
+    email: string;
+    role: Role;
+    verified: boolean;
+    type?: 'reset' | 'verify';
+  }) {
+    const payload = {
+      sub: id,
+      email,
+      role,
+      verified,
+      type: type || undefined,
+    };
+    const expiry = type === 'reset' ? 'RESET_EXPIRES' : 'VERIFY_EXPIRES';
+    const secret = type === 'reset' ? 'RESET_SECRET' : 'VERIFY_SECRET';
+
+    return this.jwt.signAsync(payload, {
+      expiresIn: this.cfg.get(expiry),
+      secret: this.cfg.get(secret),
+    });
+  }
+
   async register(dto: RegisterDTO) {
     //   hash
 
@@ -105,16 +139,25 @@ export class AuthService {
 
     //   save
     const user = await this.prisma.user.create({
-      data: { ...dto, password: hashed, verificationToken: generateToken() },
+      data: { ...dto, password: hashed },
     });
 
     delete user.password;
+
+    //create verificatioin jwt
+
+    const verify_token = await this.generateJWTToken({
+      id: user.id,
+      email: user.email,
+      role: user.role as Role,
+      verified: user.isVerified,
+    });
 
     //  send email link
 
     await this.email.sendVerificationEmail(user.email, {
       firstName: user.firstName,
-      verificationLink: `${process.env.FRONTEND_URL}/verify-email?token=${user.verificationToken}`,
+      verificationLink: `${process.env.FRONTEND_URL}/verify-email?token=${verify_token}`,
     });
 
     return {
@@ -198,16 +241,27 @@ export class AuthService {
       throw new ForbiddenException('No token provided');
     }
 
-    const cached = await this.prisma.user.findFirst({
-      where: { verificationToken: token },
-    });
+    const payload = (await this.jwt.verifyAsync(token, {
+      secret: this.cfg.get('VERIFY_SECRET'),
+    })) as unknown as JwtPayload;
 
-    if (!cached)
-      throw new ForbiddenException('Invalid or expired verification token');
+    if (!payload || !payload.sub) {
+      throw new ForbiddenException('Invalid token');
+    }
+
+    const cached = await this.prisma.user.findUnique({
+      where: { id: payload.sub },
+    });
+    if (cached.isVerified)
+      throw new ConflictException('User is already Verified');
+
+    if (payload.exp < Date.now() / 1000) {
+      throw new ForbiddenException('Token is expired');
+    }
 
     const user = await this.prisma.user.update({
-      where: { id: cached.id },
-      data: { isVerified: true, verificationToken: null },
+      where: { id: payload.sub },
+      data: { isVerified: true },
     });
 
     return {
@@ -228,6 +282,44 @@ export class AuthService {
           verified: 'isVerified' in user && user.isVerified,
         }),
       },
+    };
+  }
+
+  async resend_verify(email: string) {
+    if (!email) {
+      throw new ForbiddenException('No token provided');
+    }
+
+    const cached = await this.prisma.user.findFirst({
+      where: { email },
+    });
+
+    if (!cached) throw new NotFoundException('User does not exist');
+
+    //if verified, do not resend
+
+    if (cached.isVerified) {
+      throw new ConflictException('User is already verified');
+    }
+
+    const verify_token = await this.generateJWTToken({
+      id: cached.id,
+      email: cached.email,
+      role: cached.role as Role,
+      verified: cached.isVerified,
+    });
+
+    //  send email link
+
+    await this.email.sendVerificationEmail(cached.email, {
+      firstName: cached.firstName,
+      verificationLink: `${process.env.FRONTEND_URL}/verify-email?token=${verify_token}`,
+    });
+
+    return {
+      message: 'Verification Mail Sent',
+      status: 'success',
+      data: null,
     };
   }
 
@@ -285,34 +377,29 @@ export class AuthService {
     };
   }
 
-  async forgotPassword(req: Request) {
-    const { email } = req.body as { email: string };
-
+  async forgotPassword(email: string) {
     // Find user by email
     const user = await this.prisma.user.findUnique({
       where: { email },
     });
 
     if (!user) {
-      throw new ForbiddenException('User does not exist');
+      throw new NotFoundException('User does not exist');
     }
 
-    // generate reset token and save to user
-
-    const fPwdToken = createHash('sha256')
-      .update(generateToken())
-      .digest('hex');
-
-    await this.prisma.user.update({
-      where: { email },
-      data: { resetToken: fPwdToken },
+    const reset_token = await this.generateJWTToken({
+      id: user.id,
+      email: user.email,
+      role: user.role as Role,
+      verified: user.isVerified,
+      type: 'reset',
     });
 
     //send to mail
 
     await this.email.sendPasswordResetEmail(
       email,
-      `${process.env.FRONTEND_URL}/reset-password?token=${user.resetToken}`,
+      `${process.env.FRONTEND_URL}/reset-password?token=${reset_token}`,
       user.firstName,
     );
     return {
@@ -321,27 +408,38 @@ export class AuthService {
     };
   }
 
-  async resetPassword(req: Request) {
-    const { token, password } = req.body as { token: string; password: string };
+  async resetPassword(dto: ResetPwdDTO) {
+    const { token, password } = dto;
 
-    // Find user by reset token
-    const user = await this.prisma.user.findFirst({
-      where: { resetToken: token },
-    });
+    const isBlacklisted = await this.redis.isTokenBlacklisted(token);
+    if (isBlacklisted) {
+      throw new ForbiddenException('Reset link expired or already used');
+    }
 
-    if (!user) {
-      throw new ForbiddenException('Invalid or expired reset token');
+    const payload = (await this.jwt.verifyAsync(token, {
+      secret: this.cfg.get('RESET_SECRET'),
+    })) as unknown as JwtPayload;
+
+    if (!payload || !payload.sub || payload.type !== 'reset') {
+      throw new ForbiddenException('Invalid token');
+    }
+
+    if (payload.exp < Date.now() / 1000) {
+      throw new ForbiddenException('Token is expired');
     }
 
     // Hash new password and update user
     const hashedPassword = await hash(password);
+
     await this.prisma.user.update({
-      where: { id: user.id },
-      data: { password: hashedPassword, resetToken: null },
+      where: { id: payload.sub },
+      data: { password: hashedPassword },
     });
 
+    await this.redis.blacklistToken(token, payload.exp);
+
     return {
-      message: 'Password reset successfully',
+      message: 'Password reset successfully. Log in Again.',
       status: 'success',
     };
   }
@@ -362,7 +460,7 @@ export class AuthService {
     const hashedPassword = await hash(newPwd);
     await this.prisma.user.update({
       where: { id: id },
-      data: { password: hashedPassword, resetToken: null },
+      data: { password: hashedPassword },
     });
 
     ///force to login in again
